@@ -74,10 +74,13 @@ async function installLinux() {
     if ((await run('sudo', ['apt', 'update'])) !== 0) return 1
     return run('sudo', ['apt', 'install', '-y', 'build-essential'])
   }
-  if (await commandExists('dnf')) return run('sudo', ['dnf', 'install', '-y', 'make', 'gcc', 'gcc-c++'])
-  if (await commandExists('yum')) return run('sudo', ['yum', 'install', '-y', 'make', 'gcc', 'gcc-c++'])
+  if (await commandExists('dnf'))
+    return run('sudo', ['dnf', 'install', '-y', 'make', 'gcc', 'gcc-c++'])
+  if (await commandExists('yum'))
+    return run('sudo', ['yum', 'install', '-y', 'make', 'gcc', 'gcc-c++'])
   if (await commandExists('pacman')) return run('sudo', ['pacman', '-S', '--needed', 'base-devel'])
-  if (await commandExists('zypper')) return run('sudo', ['zypper', 'install', '-y', 'make', 'gcc', 'gcc-c++'])
+  if (await commandExists('zypper'))
+    return run('sudo', ['zypper', 'install', '-y', 'make', 'gcc', 'gcc-c++'])
   return 1
 }
 
@@ -93,7 +96,9 @@ async function installMac() {
     return run('brew', ['install', 'make'])
   }
 
-  console.log('Homebrew não encontrado. Instala o Homebrew ou conclui as Command Line Tools da Apple.')
+  console.log(
+    'Homebrew não encontrado. Instala o Homebrew ou conclui as Command Line Tools da Apple.'
+  )
   return 1
 }
 

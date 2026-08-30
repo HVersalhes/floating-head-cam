@@ -35,10 +35,10 @@ export const defaultShortcuts = {
 
 function getGpuName(): string {
   try {
-    return execSync('wmic path win32_VideoController get name', {
-      encoding: 'utf8',
-      stdio: 'pipe'
-    }).toLowerCase()
+    return execSync(
+      'powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"',
+      { encoding: 'utf8', stdio: 'pipe' }
+    ).toLowerCase()
   } catch {
     return ''
   }

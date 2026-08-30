@@ -403,33 +403,6 @@ export function CameraPage(): React.JSX.Element {
     initialized
   ])
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent): void => {
-      if (e.key === '1') {
-        setSizeIndex(0)
-        applySize(0, shape)
-      }
-      if (e.key === '2') {
-        setSizeIndex(1)
-        applySize(1, shape)
-      }
-      if (e.key === '3') {
-        setSizeIndex(2)
-        applySize(2, shape)
-      }
-      if (e.key === '4') {
-        setSizeIndex(3)
-        applySize(3, shape)
-      }
-      if (e.key === '5') {
-        setSizeIndex(4)
-        applySize(4, shape)
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [applySize, shape])
-
   if (!initialized) return <div className="app-container" />
 
   const computedRadius = sizeIndex === 4 ? '0' : shape === 'circle' ? '50%' : `${rounding}px`

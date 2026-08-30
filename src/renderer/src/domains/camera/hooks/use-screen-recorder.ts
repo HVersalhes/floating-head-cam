@@ -256,18 +256,13 @@ export function useScreenRecorder(): {
           ...dest.stream.getAudioTracks()
         ])
 
+        // Chromium records WebM (VP9/VP8). The chosen encoder is applied by
+        // FFmpeg in the main process, which always re-encodes the stream.
         let mimeType = 'video/webm; codecs=vp9,opus'
-        if (encoder === 'libx264' || encoder === 'h264_videotoolbox') {
-          mimeType = 'video/webm; codecs=avc1,opus'
-          if (!MediaRecorder.isTypeSupported(mimeType)) {
-            mimeType = 'video/webm; codecs=h264,opus'
-          }
-        } else if (encoder === 'libvpx') {
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
           mimeType = 'video/webm; codecs=vp8,opus'
         }
-
         if (!MediaRecorder.isTypeSupported(mimeType)) {
-          console.warn(`MimeType ${mimeType} not supported, falling back to default webm`)
           mimeType = 'video/webm'
         }
 
@@ -298,25 +293,28 @@ export function useScreenRecorder(): {
           }
           audioNodesRef.current = []
           await chunkPromiseChain
-          ipc.send('recording-stopped')
           try {
             await ipc.invoke('recording-stop')
           } catch (err) {
             console.error('Failed to finalize recording file:', err)
           }
+          ipc.send('recording-stopped')
           mediaRecorderRef.current = null
         }
 
         const started = await ipc.invoke('recording-start', {
           encoder,
           resolution,
-          fps,
-          systemAudioVolume,
-          microphoneAudioVolume
+          fps
         })
         if (!started) {
           throw new Error('Recording could not start (destination folder unavailable?)')
         }
+        mediaRecorder.onerror = () => {
+          console.error('MediaRecorder error; stopping recording')
+          stopRecording()
+        }
+
         mediaRecorder.start(2000)
         mediaRecorderRef.current = mediaRecorder
 
@@ -333,7 +331,7 @@ export function useScreenRecorder(): {
         audioNodesRef.current = []
       }
     },
-    []
+    [stopRecording]
   )
 
   useEffect(() => {

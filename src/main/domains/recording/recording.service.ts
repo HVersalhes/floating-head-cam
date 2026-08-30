@@ -5,6 +5,18 @@ import path from 'path'
 import fs from 'fs'
 import { PassThrough } from 'stream'
 import { currentState } from '../settings/settings.service'
+import { getRecordingWorker } from '../window/window.service'
+
+const ENCODER_ALLOWLIST = new Set([
+  'libx264',
+  'h264_nvenc',
+  'h264_qsv',
+  'h264_amf',
+  'h264_videotoolbox'
+])
+const RESOLUTION_ALLOWLIST = new Set(['720p', '1080p', '1440p', '2160p'])
+const FPS_ALLOWLIST = new Set(['30', '60'])
+const MAX_CHUNK_BYTES = 32 * 1024 * 1024
 
 let ffmpegPath = ffmpegStatic
 if (ffmpegPath && ffmpegPath.includes('app.asar')) {
@@ -86,24 +98,43 @@ export function setupRecordingIPC(): void {
     'recording-start',
     (
       event,
-      {
-        encoder,
-        resolution,
-        fps,
-        systemAudioVolume,
-        microphoneAudioVolume
-      }: {
+      payload: {
         encoder?: string
         resolution?: string
         fps?: string
-        systemAudioVolume?: number
-        microphoneAudioVolume?: number
       } = {}
     ) => {
+      const worker = getRecordingWorker()
+      if (!worker || event.sender.id !== worker.webContents.id) {
+        console.warn('recording-start rejected: sender is not the recording worker')
+        return false
+      }
       if (recordingStream || ffmpegProcess) {
         console.warn('recording-start ignored: a recording is already in progress')
         return false
       }
+      const encoder =
+        typeof payload === 'object' &&
+        payload !== null &&
+        typeof payload.encoder === 'string' &&
+        ENCODER_ALLOWLIST.has(payload.encoder)
+          ? payload.encoder
+          : null
+      const resolution =
+        typeof payload === 'object' &&
+        payload !== null &&
+        typeof payload.resolution === 'string' &&
+        RESOLUTION_ALLOWLIST.has(payload.resolution)
+          ? payload.resolution
+          : null
+      const fps =
+        typeof payload === 'object' &&
+        payload !== null &&
+        typeof payload.fps === 'string' &&
+        FPS_ALLOWLIST.has(payload.fps)
+          ? payload.fps
+          : null
+
       recordingStream = new PassThrough()
       recordingOwnerContentsId = event.sender.id
       isAborted = false
@@ -121,60 +152,62 @@ export function setupRecordingIPC(): void {
 
       const isMac = process.platform === 'darwin'
       const resolvedEncoder = encoder || (isMac ? 'h264_videotoolbox' : 'libx264')
-      const targetFps = parseInt(fps || '60', 10) || 60
-      const dims = RESOLUTION_DIMENSIONS[resolution || '1080p'] ?? RESOLUTION_DIMENSIONS['1080p']
-      const targetBitrate = RESOLUTION_BITRATES[resolution || '1080p'] ?? 8000
+      const targetFps = fps ? parseInt(fps, 10) : 60
+      const dims =
+        (typeof resolution === 'string' && RESOLUTION_DIMENSIONS[resolution]) ||
+        RESOLUTION_DIMENSIONS['1080p']
+      const targetBitrate =
+        (typeof resolution === 'string' && RESOLUTION_BITRATES[resolution]) ||
+        RESOLUTION_BITRATES['1080p']
 
       const vf = `scale=${dims.width}:${dims.height}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd+full_chroma_int:out_color_matrix=bt709:out_range=tv,pad=ceil(iw/2)*2:ceil(ih/2)*2,fps=fps=${targetFps}`
 
-      void systemAudioVolume
-      void microphoneAudioVolume
-
+      // The MediaRecorder in Chromium produces WebM (VP9/VP8) regardless of the
+      // requested encoder, so the captured stream must always be re-encoded.
+      // Encode with the selected encoder (CPU or hardware) and apply the
+      // resolution/FPS filters so those settings take effect on every backend.
       const isH264 = resolvedEncoder.includes('264') || resolvedEncoder.includes('avc')
       const outputOptions = [
         '-map 0:v:0',
         '-map 0:a:0?',
         '-ar 48000',
         '-ac 2',
-        '-movflags +faststart'
+        '-movflags +faststart',
+        '-pix_fmt yuv420p',
+        '-color_primaries bt709',
+        '-color_trc bt709',
+        '-colorspace bt709',
+        '-color_range tv',
+        `-vf ${vf}`,
+        `-b:v ${targetBitrate}k`,
+        '-maxrate:v ' + Math.round(targetBitrate * 1.5) + 'k',
+        '-bufsize:v ' + Math.round(targetBitrate * 2) + 'k'
       ]
+
+      if (resolvedEncoder === 'libx264') {
+        outputOptions.push('-preset ultrafast', '-tune zerolatency')
+      } else if (resolvedEncoder === 'h264_videotoolbox') {
+        outputOptions.push('-allow_sw 1', '-realtime 1')
+      } else if (resolvedEncoder === 'h264_nvenc') {
+        outputOptions.push('-preset p1', '-tune ll')
+      } else if (resolvedEncoder === 'h264_qsv') {
+        outputOptions.push('-preset veryfast')
+      } else if (resolvedEncoder === 'h264_amf') {
+        outputOptions.push('-quality speed')
+      } else {
+        outputOptions.push('-preset ultrafast', '-tune zerolatency')
+      }
 
       if (isH264) {
         outputOptions.push(
           '-bsf:v',
           'h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1'
         )
-      } else {
-        outputOptions.push(
-          '-pix_fmt yuv420p',
-          '-color_primaries bt709',
-          '-color_trc bt709',
-          '-colorspace bt709',
-          '-color_range tv',
-          `-vf ${vf}`,
-          `-b:v ${targetBitrate}k`,
-          '-maxrate:v ' + Math.round(targetBitrate * 1.5) + 'k',
-          '-bufsize:v ' + Math.round(targetBitrate * 2) + 'k'
-        )
-
-        if (resolvedEncoder === 'libx264') {
-          outputOptions.push('-preset ultrafast', '-tune zerolatency')
-        } else if (resolvedEncoder === 'h264_videotoolbox') {
-          outputOptions.push('-allow_sw 1', '-realtime 1')
-        } else if (resolvedEncoder === 'h264_nvenc') {
-          outputOptions.push('-preset p1', '-tune ll')
-        } else if (resolvedEncoder === 'h264_qsv') {
-          outputOptions.push('-preset veryfast')
-        } else if (resolvedEncoder === 'h264_amf') {
-          outputOptions.push('-quality speed')
-        }
       }
-
-      const finalVideoCodec = isH264 ? 'copy' : resolvedEncoder
 
       ffmpegProcess = ffmpeg(recordingStream)
         .inputFormat('webm')
-        .videoCodec(finalVideoCodec)
+        .videoCodec(resolvedEncoder)
         .outputOptions(outputOptions)
         .audioCodec('aac')
         .audioBitrate('192k')
@@ -202,13 +235,27 @@ export function setupRecordingIPC(): void {
     }
   )
 
-  ipcMain.on('recording-chunk', (_, chunk: ArrayBuffer) => {
-    if (recordingStream && !recordingStream.writableEnded) {
-      recordingStream.write(Buffer.from(chunk))
+  ipcMain.on('recording-chunk', (event, chunk) => {
+    if (event.sender.id !== recordingOwnerContentsId) return
+    if (!recordingStream || recordingStream.writableEnded) return
+
+    let buffer: Buffer | null = null
+    if (chunk instanceof ArrayBuffer) {
+      buffer = Buffer.from(chunk)
+    } else if (ArrayBuffer.isView(chunk)) {
+      buffer = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+    } else {
+      return
     }
+    if (buffer.byteLength === 0 || buffer.byteLength > MAX_CHUNK_BYTES) return
+
+    recordingStream.write(buffer)
   })
 
-  ipcMain.handle('recording-stop', async () => {
+  ipcMain.handle('recording-stop', async (event) => {
+    if (event.sender.id !== recordingOwnerContentsId) {
+      return { success: false, error: 'Not the recording owner' }
+    }
     if (!recordingStream || !ffmpegProcess) {
       return { success: false, error: 'No recording in progress' }
     }

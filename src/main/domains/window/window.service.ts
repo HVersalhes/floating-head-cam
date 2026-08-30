@@ -8,7 +8,30 @@ import { getIsCameraOn } from '../camera/camera.service'
 import { currentState, saveSettings } from '../settings/settings.service'
 let _settingsWindow: BrowserWindow | null = null
 let _recordingWorker: BrowserWindow | null = null
+let _cameraWindow: BrowserWindow | null = null
 let positionSaveTimer: ReturnType<typeof setTimeout> | null = null
+
+function safeExternalUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol === 'https:') return url
+    if (
+      is.dev &&
+      parsed.protocol === 'http:' &&
+      (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
+    ) {
+      return url
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
+function openExternalIfSafe(url: string): void {
+  const safe = safeExternalUrl(url)
+  if (safe) shell.openExternal(safe)
+}
 
 export function getSettingsWindow(): BrowserWindow | null {
   return _settingsWindow
@@ -16,6 +39,10 @@ export function getSettingsWindow(): BrowserWindow | null {
 
 export function getRecordingWorker(): BrowserWindow | null {
   return _recordingWorker
+}
+
+export function getCameraWindow(): BrowserWindow | null {
+  return _cameraWindow
 }
 
 type WindowCallbacks = {
@@ -44,7 +71,9 @@ export function createSettingsWindow(): void {
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
       autoplayPolicy: 'no-user-gesture-required',
       devTools: false
     }
@@ -66,7 +95,9 @@ export function createRecordingWorker(): void {
     show: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
       autoplayPolicy: 'no-user-gesture-required',
       backgroundThrottling: false,
       devTools: false
@@ -89,15 +120,6 @@ export function setWindowPosition(pos: string): void {
       win.webContents.send('set-camera-position', pos)
     }
   })
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function resizeWindow(_sizeObj: {
-  width: number
-  height: number
-  position?: 'right' | 'fullscreen'
-}): void {
-  // Ignored in Full-Screen architecture
 }
 
 export function getCameraDimensions(): { width: number; height: number } {
@@ -196,7 +218,9 @@ export function createWindow(callbacks: WindowCallbacks): void {
       skipTaskbar: true,
       webPreferences: {
         preload: join(__dirname, '../preload/index.js'),
-        sandbox: false,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
         autoplayPolicy: 'no-user-gesture-required',
         devTools: false
       }
@@ -223,7 +247,7 @@ export function createWindow(callbacks: WindowCallbacks): void {
       }, 300)
     })
     mainWindow.webContents.setWindowOpenHandler((details) => {
-      shell.openExternal(details.url)
+      openExternalIfSafe(details.url)
       return { action: 'deny' }
     })
     if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -231,6 +255,10 @@ export function createWindow(callbacks: WindowCallbacks): void {
     } else {
       mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
     }
+    _cameraWindow = mainWindow
+    mainWindow.on('closed', () => {
+      if (_cameraWindow === mainWindow) _cameraWindow = null
+    })
     return
   }
 
@@ -289,6 +317,10 @@ export function createWindow(callbacks: WindowCallbacks): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+  _cameraWindow = mainWindow
+  mainWindow.on('closed', () => {
+    if (_cameraWindow === mainWindow) _cameraWindow = null
+  })
 }
 
 export function moveCameraToScreen(screenId: string): void {

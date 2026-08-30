@@ -18,8 +18,16 @@ vi.mock('electron', () => ({
   BrowserWindow: {
     fromWebContents: vi.fn(),
     getAllWindows: vi.fn().mockReturnValue([{}])
+  },
+  screen: {
+    getAllDisplays: vi.fn().mockReturnValue([])
+  },
+  shell: {
+    openExternal: vi.fn()
   }
 }))
+
+vi.mock('@electron-toolkit/utils', () => ({ is: { dev: false } }))
 
 vi.mock('fluent-ffmpeg', () => {
   const ffmpegMock = Object.assign(

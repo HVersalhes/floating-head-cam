@@ -16,6 +16,7 @@ import { getIsCameraOn, setIsCameraOn } from './domains/camera/camera.service'
 import { t } from '../shared/i18n'
 import {
   currentState,
+  defaultShortcuts,
   loadSettings,
   resetToDefaults,
   saveSettings,
@@ -30,15 +31,33 @@ import { showCountdown } from './domains/recording/countdown.service'
 import {
   createWindow,
   getSettingsWindow,
-  resizeWindow,
   setWindowPosition,
   getRecordingWorker,
   createRecordingWorker,
   moveCameraToScreen,
   moveCameraWindow,
-  resizeCameraWindow
+  resizeCameraWindow,
+  getCameraWindow
 } from './domains/window/window.service'
 import { setupRecordingIPC, setOnRecordingAborted } from './domains/recording/recording.service'
+import {
+  ACCELERATOR_PATTERN,
+  WINDOW_POSITIONS,
+  isBoundedNumber,
+  isObject,
+  sanitizeDevices,
+  settingValidators,
+  trayValidators
+} from './ipc-validation'
+
+function isRecordingWorkerSender(sender: Electron.WebContents): boolean {
+  const worker = getRecordingWorker()
+  return Boolean(worker && sender.id === worker.webContents.id)
+}
+function isCameraWindowSender(sender: Electron.WebContents): boolean {
+  const win = getCameraWindow()
+  return Boolean(win && sender.id === win.webContents.id)
+}
 
 const windowCallbacks = {
   onFocus: (win: BrowserWindow) => {
@@ -90,6 +109,9 @@ async function startRecordingFlow(): Promise<void> {
 app.commandLine.appendSwitch('disable-features', 'AudioServiceOutOfProcess')
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 app.commandLine.appendSwitch('force-color-profile', 'srgb')
+if (process.env.FHC_SAFE_GPU === '1') {
+  app.disableHardwareAcceleration()
+}
 if (process.platform === 'win32') {
   // app.disableHardwareAcceleration() // Disabled for performance with Cam Link
 }
@@ -107,10 +129,13 @@ app.whenReady().then(() => {
     app.dock?.hide()
     app.setLoginItemSettings({ openAtLogin: false, openAsHidden: false })
   }
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) =>
-    callback(true)
+  const allowedPermissions = new Set(['media', 'display-capture'])
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) =>
+    callback(allowedPermissions.has(permission))
   )
-  session.defaultSession.setPermissionCheckHandler(() => true)
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission) =>
+    allowedPermissions.has(permission)
+  )
   session.defaultSession.setDisplayMediaRequestHandler(
     (_request, callback) => {
       desktopCapturer
@@ -143,17 +168,17 @@ app.whenReady().then(() => {
   )
 
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    const scriptSrc = is.dev
-      ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
-      : "script-src 'self'"
+    const contentSecurityPolicy = is.dev
+      ? "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws:"
+      : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
     callback({
       responseHeaders: {
         ...details.responseHeaders,
-        'Content-Security-Policy': [scriptSrc]
+        'Content-Security-Policy': [contentSecurityPolicy]
       }
     })
   })
-  electronApp.setAppUserModelId('com.electron')
+  electronApp.setAppUserModelId('com.electron.app')
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
@@ -204,17 +229,26 @@ app.whenReady().then(() => {
     'sidebarWidthPercentage',
     'sidebarPosition'
   ])
-  ipcMain.on('sync-tray', (_, state) => {
-    for (const key of Object.keys(state)) {
-      if (allowedSyncTrayKeys.has(key)) {
-        currentState[key] = state[key]
+  ipcMain.on('sync-tray', (_, payload) => {
+    if (!isObject(payload)) return
+    for (const key of Object.keys(payload)) {
+      if (!allowedSyncTrayKeys.has(key)) continue
+      if (key === 'devices') {
+        const devices = sanitizeDevices(payload[key])
+        if (devices) currentState.devices = devices
+        continue
+      }
+      const validator = trayValidators[key]
+      const value = payload[key]
+      if (validator && validator(value)) {
+        currentState[key] = value
       }
     }
     saveSettings()
     buildTrayMenu(currentState)
     const sw = getSettingsWindow()
-    if (sw && state.language) {
-      sw.setTitle(t('tray.preferences', state.language).replace('...', ''))
+    if (sw && (payload.language === 'en' || payload.language === 'pt')) {
+      sw.setTitle(t('tray.preferences', payload.language).replace('...', ''))
     }
   })
 
@@ -236,8 +270,12 @@ app.whenReady().then(() => {
     'sidebarWidthPercentage',
     'sidebarPosition'
   ])
-  ipcMain.on('update-setting', (_, { key, value }) => {
-    if (!allowedSettingKeys.has(key)) return
+  ipcMain.on('update-setting', (_, payload) => {
+    if (!isObject(payload)) return
+    const { key, value } = payload
+    if (typeof key !== 'string' || !allowedSettingKeys.has(key)) return
+    const validator = settingValidators[key]
+    if (!validator || !validator(value)) return
     currentState[key] = value
     saveSettings()
     buildTrayMenu(currentState)
@@ -279,6 +317,7 @@ app.whenReady().then(() => {
   })
 
   ipcMain.on('set-window-position', (_, pos) => {
+    if (typeof pos !== 'string' || !WINDOW_POSITIONS.has(pos)) return
     setWindowPosition(pos)
   })
   function setRecordingState(isRecording: boolean): void {
@@ -290,11 +329,16 @@ app.whenReady().then(() => {
     )
   }
 
-  ipcMain.on('recording-started', () => setRecordingState(true))
+  ipcMain.on('recording-started', (event) => {
+    if (isRecordingWorkerSender(event.sender)) setRecordingState(true)
+  })
 
-  ipcMain.on('recording-stopped', () => setRecordingState(false))
+  ipcMain.on('recording-stopped', (event) => {
+    if (isRecordingWorkerSender(event.sender)) setRecordingState(false)
+  })
 
-  ipcMain.on('recording-permission-denied', (_, payload) => {
+  ipcMain.on('recording-permission-denied', (event, payload) => {
+    if (!isRecordingWorkerSender(event.sender)) return
     setRecordingState(false)
     BrowserWindow.getAllWindows().forEach((w) => {
       if (w !== getRecordingWorker()) {
@@ -360,25 +404,14 @@ app.whenReady().then(() => {
     }
   })
 
-  ipcMain.handle('get-screen-sources', async () => {
-    const sources = await desktopCapturer.getSources({ types: ['screen'] })
-    return sources.map((s) => ({ id: s.id, name: s.name, display_id: s.display_id }))
-  })
-
-  ipcMain.handle('get-displays', () => {
-    return screen.getAllDisplays().map((d) => ({
-      id: d.id.toString(),
-      label: d.label || `Display ${d.id}`,
-      bounds: d.bounds
-    }))
-  })
-
   ipcMain.on('update-shortcut', (_, key, value) => {
+    if (typeof key !== 'string' || !(key in defaultShortcuts)) return
+    if (typeof value !== 'string' || !value) return
+    if (!ACCELERATOR_PATTERN.test(value)) return
     shortcuts[key] = value
     saveSettings()
     buildTrayMenu(currentState)
-    const sw = getSettingsWindow()
-    const floatingHead = BrowserWindow.getAllWindows().find((w) => w !== sw)
+    const floatingHead = getCameraWindow()
     if (floatingHead) {
       globalShortcut.unregisterAll()
       if (shortcuts.toggleCamera) {
@@ -400,30 +433,32 @@ app.whenReady().then(() => {
       win.webContents.send('settings-reset', { shortcuts, state: currentState })
     })
   })
-  ipcMain.on('close-window', () => app.quit())
-  ipcMain.on('resize-window', (_, sizeObj) => {
-    resizeWindow(sizeObj)
-  })
 
   setupRecordingIPC()
 
   ipcMain.on('set-ignore-mouse-events', (event, ignore, options) => {
     if (process.platform === 'linux') return
+    if (typeof ignore !== 'boolean') return
     const win = BrowserWindow.fromWebContents(event.sender)
-    if (win) {
-      if (options) {
-        win.setIgnoreMouseEvents(ignore, options)
-      } else {
-        win.setIgnoreMouseEvents(ignore)
-      }
-    }
+    if (!win) return
+    const opts =
+      isObject(options) && typeof options.forward === 'boolean'
+        ? { forward: options.forward }
+        : undefined
+    win.setIgnoreMouseEvents(ignore, opts)
   })
 
-  ipcMain.on('move-camera-window', (_, x: number, y: number) => {
+  ipcMain.on('move-camera-window', (event, x, y) => {
+    if (!isCameraWindowSender(event.sender)) return
+    if (!isBoundedNumber(x, -100000, 100000) || !isBoundedNumber(y, -100000, 100000)) return
     moveCameraWindow(x, y)
   })
 
-  ipcMain.on('resize-camera-window', (_, width: number, height: number, x?: number, y?: number) => {
+  ipcMain.on('resize-camera-window', (event, width, height, x, y) => {
+    if (!isCameraWindowSender(event.sender)) return
+    if (!isBoundedNumber(width, 50, 20000) || !isBoundedNumber(height, 50, 20000)) return
+    if (x !== undefined && !isBoundedNumber(x, -100000, 100000)) return
+    if (y !== undefined && !isBoundedNumber(y, -100000, 100000)) return
     resizeCameraWindow(width, height, x, y)
   })
 

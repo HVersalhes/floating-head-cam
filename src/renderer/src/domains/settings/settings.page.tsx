@@ -361,10 +361,7 @@ function RecordingSettings({
                       textAlign: 'center'
                     }}
                   >
-                    {t('settings.recordingSystemAudioWindowsWarning', language) ||
-                      (language === 'pt'
-                        ? 'Medidor indisponível no Windows antes de gravar.'
-                        : 'Meter unavailable on Windows before recording.')}
+                    {t('settings.recordingSystemAudioWarning', language)}
                   </div>
                 ) : (
                   renderMeter(sysLevel)

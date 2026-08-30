@@ -59,7 +59,7 @@ export function useShortcuts(): UseShortcutsReturn {
     shape: 'circle',
     rounding: 24,
     borderGradient: 'none',
-    borderWidth: 6,
+    borderWidth: 4,
     isBorderAnimated: false,
     sizeIndex: 0,
     sidebarWidthPercentage: 35,
